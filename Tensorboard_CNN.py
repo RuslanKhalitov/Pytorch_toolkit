@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import torchvision
 from torch.utils.data import DataLoader
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
@@ -133,8 +134,9 @@ train_dataset = datasets.MNIST(root='dataset/',
 # Initialize network
 
 
-batch_sizes = [1, 64, 256]
-learning_rates = [0.01, 0.001, 0.0001]
+batch_sizes = [256]
+learning_rates = [0.01]
+classes = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
 
 for batch_size in batch_sizes:
     for learning_rate in learning_rates:
@@ -167,6 +169,7 @@ for batch_size in batch_sizes:
                 # Forward
                 scores = model(data)
                 loss = criterion(scores, targets)
+                losses.append(loss.item())
 
                 # Backward
                 optimizer.zero_grad()
@@ -175,14 +178,45 @@ for batch_size in batch_sizes:
                 # Grad descent/Adam step
                 optimizer.step()
 
+                # add pictures
+                img_grid = torchvision.utils.make_grid(data)
+                writer.add_image('mnist_images', img_grid)
+
+                # add viz for the weights distribution
+                writer.add_histogram('fc1', model.fc1.weight)
+
+                # Calculate 'running' accuracy
                 _, predictions = scores.max(1)
                 num_correct = (predictions == targets).sum()
 
                 running_train_acc = float(num_correct) / float(data.shape[0])
+                accuracies.append(running_train_acc)
+
                 writer.add_scalar('Training loss', loss, global_step=step)
                 writer.add_scalar('Training accuracy', running_train_acc, global_step=step)
+
+                # Add features viz
+                features = data.reshape(data.shape[0], -1)
+                class_labels = [classes[label] for label in predictions]
+
+                if batch_ix == 200:
+                    # doesn't work for some reason
+                    # bug fix temporary
+                    import tensorflow as tf
+                    import tensorboard as tb
+                    tf.io.gfile = tb.compat.tensorflow_stub.io.gfile
+
+                    writer.add_embedding(features, metadata=class_labels,
+                                         label_img=data,
+                                         global_step=batch_ix)
+
                 step += 1
 
+            # Add hyperparameters search
+            writer.add_hparams({'lr': learning_rate, 'bsize': batch_size},
+                               {'accuracy': sum(accuracies) / len(accuracies),
+                                'loss': sum(losses) / len(losses)}
+                               )
             print(f'Epoch {epoch} has been finished')
 
 
