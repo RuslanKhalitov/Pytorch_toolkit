@@ -37,7 +37,6 @@ class VGG16_net(nn.Module):
     def create_conv_layers(self, architecture):
         layers = []
         in_channels = self.in_channels
-
         for x in architecture:
             if type(x) == int:
                 out_channels = x
