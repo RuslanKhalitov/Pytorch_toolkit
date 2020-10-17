@@ -10,7 +10,7 @@ import numpy as np
 import spacy
 import random
 from torch.utils.tensorboard import SummaryWriter  # to print to tensorboard
-from attention_transformer.utils import translate_sentence, bleu, save_checkpoint, load_checkpoint
+from attention_transformer.utils import bleu, save_checkpoint, load_checkpoint
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -18,7 +18,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 spacy_eng = spacy.load('en')
 spacy_ger = spacy.load('de')
-
 
 # Define tokenizers
 def tokenize_ger(text):
