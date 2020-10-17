@@ -1,3 +1,6 @@
+# Paper: https://arxiv.org/pdf/1409.0473.pdf
+# Video: https://www.youtube.com/watch?v=sQUqQddQtB4&list=PLhhyoLH6IjfxeoooqP9rhU3HJIAVAJ3Vz&index=31
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -48,7 +51,12 @@ class Encoder(nn.Module):
         self.num_layers = num_layers
 
         self.embedding = nn.Embedding(input_size, embedding_size)
-        self.rnn = nn.LSTM(embedding_size, hidden_size, num_layers, dropout=p_drop)
+        self.rnn = nn.LSTM(embedding_size, hidden_size, num_layers,
+                           bidirectional=True)
+
+        # Allow the model to choose what is important (both hidden and cell)
+        self.fc_hidden = nn.Linear(hidden_size*2, hidden_size)
+        self.fc_cell = nn.Linear(hidden_size*2, hidden_size)
 
     def forward(self, x):
         # x[sequence_length, N], N-batch_size
@@ -57,10 +65,15 @@ class Encoder(nn.Module):
         embedding = self.dropout(embedding)
         # embedding[sequence_length, N, embedding_size]
 
-        outputs, (hidden, cell) = self.rnn(embedding)
+        encoder_states, (hidden, cell) = self.rnn(embedding)
         # outputs[sequence_length, N, hidden_size]
 
-        return hidden, cell
+        # hidden[0:1] — for the forward part, hidden[1:2] — backward
+        # (2, N, hidden_size)
+        hidden = self.fc_hidden(torch.cat((hidden[0:1], hidden[1:2]), dim=2))
+        cell = self.fc_hidden(torch.cat((cell[0:1], cell[1:2]), dim=2))
+
+        return encoder_states, hidden, cell
 
 
 class Decoder(nn.Module):
@@ -72,10 +85,15 @@ class Decoder(nn.Module):
 
         self.dropout = nn.Dropout(p=p_drop)
         self.embedding = nn.Embedding(input_size, embedding_size)
-        self.rnn = nn.LSTM(embedding_size, hidden_size, num_layers, dropout=p_drop)
+        # new
+        self.rnn = nn.LSTM(hidden_size*2+embedding_size, hidden_size, num_layers)
+        self.energy = nn.Linear(hidden_size*3, 1)
+        self.softmax = nn.Softmax(dim=0)
+        self.relu = nn.ReLU()
+
         self.fc = nn.Linear(hidden_size, output_size)
 
-    def forward(self, x, hidden, cell):
+    def forward(self, x, encoder_states, hidden, cell):
         # x[N], N-batch_size, since we send in here only one word
 
         x = x.unsqueeze(0)
@@ -85,7 +103,27 @@ class Decoder(nn.Module):
         embedding = self.dropout(embedding)
         # embedding[1, N, embedding_size]
 
-        outputs, (hidden, cell) = self.rnn(embedding, (hidden, cell))
+        sequence_len = encoder_states.shape[0]
+        h_reshaped = hidden.repeat(sequence_len, 1, 1)
+        energy = self.energy(torch.cat((h_reshaped, encoder_states), dim=2))
+        energy = self.relu(energy)
+        attention = self.softmax(energy)
+        # (sequence_len, N, 1)
+        attention = attention.permute(1, 2, 0)
+        # (N, 1, sequence_len)
+        encoder_states = encoder_states.permute(1, 0, 2)
+        # (N, sequence_len, hidden_size*2)
+
+
+        # Elementwise multiplication of attention and hidden states
+        # (b×n×m) @ (b×m×p) -> (b×n×p) tensor.
+        context_vector = torch.bmm(attention, encoder_states).permute(1,0,2)
+        # (N, 1, hidden_size*2) -> (1, N, hidden_size*2)
+
+        rnn_input = torch.cat((context_vector, embedding), dim=2)
+
+
+        outputs, (hidden, cell) = self.rnn(rnn_input, (hidden, cell))
         # outputs[1, N, hidden_size]
 
         predictions = self.fc(outputs)
@@ -113,11 +151,11 @@ class Seq2Seq(nn.Module):
 
         outputs = torch.zeros(target_length, batch_size, target_vocab_size).to(device)
 
-        hidden, cell = self.encoder(source)
+        encoder_states, hidden, cell = self.encoder(source)
 
         x = target[0]
         for index in range(1, target_length):
-            output, hidden, cell = self.decoder(x, hidden, cell)
+            output, hidden, cell = self.decoder(x, encoder_states, hidden, cell)
             outputs[index] = output
             best = output.argmax(1)
             x = target[index] if random.random() < teacher_force_ratio else best
@@ -140,7 +178,7 @@ output_size = len(english.vocab)
 encoder_embedding_size = 300
 decoder_embedding_size = 300
 hidden_size = 1024
-num_layers = 2
+num_layers = 1
 p_drop_encoder = 0.5
 p_drop_decoder = 0.5
 
@@ -181,11 +219,6 @@ criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 if load_model:
     load_checkpoint(torch.load("my_checkpoint.pth.tar"), model, optimizer)
 
-# Single sentence to test the performance of the trained model
-test_sentence = "Liebe ist Glück, aber auch Leid."
-test_gt = "Love is happiness, but also suffering."
-example = True
-
 # Main training loop
 for epoch in range(num_epochs):
     print(f"[Epoch {epoch} of {num_epochs}]")
@@ -193,13 +226,6 @@ for epoch in range(num_epochs):
         checkpoint = {'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}
         save_checkpoint(checkpoint)
 
-    if example:
-        model.eval()
-        translation = translate_sentence(
-            model, test_sentence, german, english, device, max_length=50
-        )
-        print(f"Translation: \n {translation} \n GT: \n {test_gt}")
-        model.train()
 
     for batch_idx, batch in enumerate(train_iterator):
         input_ = batch.src.to(device)
